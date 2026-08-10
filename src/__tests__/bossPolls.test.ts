@@ -4,7 +4,7 @@ import type { Client } from "discord.js";
 vi.mock("node:fs");
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { isPublishOverdue, publishBossResults, runCleanupIfOverdue, runCreateIfOverdue, runPublishIfOverdue, _forTesting } from "../bossPolls.js";
+import { createBossPolls, isPublishOverdue, preReadBossPolls, publishBossResults, runCleanupIfOverdue, runCreateIfOverdue, runPublishIfOverdue, _forTesting } from "../bossPolls.js";
 
 const { getWinners, pollAnswersToEntries, cancelRetryTimer } = _forTesting;
 
@@ -378,6 +378,31 @@ describe("publishBossResults", () => {
     const client = makeClient({});
     await expect(publishBossResults(client)).resolves.toBeUndefined();
   });
+
+  test("channels.fetch выбрасывает ConnectTimeout → ранний выход, poll не тронуты", async () => {
+    mockData({
+      preRead: {
+        thursdayWinnerText: "19:00",
+        saturdayWinnerText: null,
+        thursdayVoterLines: [],
+        saturdayVoterLines: [],
+      },
+    });
+
+    const deletePoll = vi.fn();
+    const client = {
+      channels: {
+        fetch: vi.fn().mockRejectedValue(new Error("ConnectTimeoutError")),
+      },
+    } as unknown as Client;
+
+    const promise = publishBossResults(client);
+    await vi.runAllTimersAsync();
+    await promise;
+
+    expect(deletePoll).not.toHaveBeenCalled();
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
+  });
 });
 
 // ── getWinners ────────────────────────────────────────────────────────────────
@@ -554,6 +579,103 @@ describe("runCreateIfOverdue", () => {
     await runCreateIfOverdue(client);
     expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
     delete process.env.REMINDER_CHANNEL_ID;
+  });
+});
+
+// ── createBossPolls ───────────────────────────────────────────────────────────
+
+describe("createBossPolls", () => {
+  beforeEach(() => { vi.mocked(writeFileSync).mockClear(); vi.mocked(writeFileSync).mockImplementation(() => {}); });
+
+  afterEach(() => { delete process.env.REMINDER_CHANNEL_ID; });
+
+  test("channels.fetch выбрасывает → writeFileSync не вызывается", async () => {
+    process.env.REMINDER_CHANNEL_ID = "ch1";
+    const client = {
+      channels: { fetch: vi.fn().mockRejectedValue(new Error("ConnectTimeout")) },
+    } as unknown as Client;
+
+    await createBossPolls(client);
+
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
+  });
+
+  test("первый опрос создан, второй ch.send падает → первый удаляется, writeFileSync не вызывается", async () => {
+    process.env.REMINDER_CHANNEL_ID = "ch1";
+    const deletePoll1 = vi.fn().mockResolvedValue(undefined);
+    let sendCallCount = 0;
+    const channel = {
+      isSendable: () => true,
+      send: vi.fn().mockImplementation(() => {
+        sendCallCount++;
+        if (sendCallCount === 1) return Promise.resolve({ id: "poll1-id", delete: deletePoll1 });
+        return Promise.reject(new Error("ConnectTimeout"));
+      }),
+    };
+    const client = {
+      channels: { fetch: vi.fn().mockResolvedValue(channel) },
+    } as unknown as Client;
+
+    await createBossPolls(client);
+
+    // Первый опрос должен быть удалён из Discord, данные не сохранены
+    expect(deletePoll1).toHaveBeenCalled();
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
+  });
+
+  test("оба опроса созданы → данные сохранены с правильными ID", async () => {
+    process.env.REMINDER_CHANNEL_ID = "ch1";
+    let sendCallCount = 0;
+    const channel = {
+      isSendable: () => true,
+      send: vi.fn().mockImplementation(() => {
+        sendCallCount++;
+        return Promise.resolve({ id: `poll${sendCallCount}-id`, delete: vi.fn() });
+      }),
+    };
+    const client = {
+      channels: { fetch: vi.fn().mockResolvedValue(channel) },
+    } as unknown as Client;
+
+    await createBossPolls(client);
+
+    expect(vi.mocked(writeFileSync)).toHaveBeenCalledOnce();
+    const saved = JSON.parse(vi.mocked(writeFileSync).mock.calls[0][1] as string);
+    expect(saved.thursdayPollMessageId).toBe("poll1-id");
+    expect(saved.saturdayPollMessageId).toBe("poll2-id");
+  });
+});
+
+// ── preReadBossPolls ──────────────────────────────────────────────────────────
+
+describe("preReadBossPolls", () => {
+  beforeEach(() => { vi.mocked(writeFileSync).mockClear(); vi.mocked(writeFileSync).mockImplementation(() => {}); });
+
+  test("channels.fetch выбрасывает → writeFileSync не вызывается", async () => {
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({ channelId: "ch1", thursdayPollMessageId: "p1", saturdayPollMessageId: "p2", resultsMessageId: null }),
+    );
+    const client = {
+      channels: { fetch: vi.fn().mockRejectedValue(new Error("ConnectTimeout")) },
+    } as unknown as Client;
+
+    await preReadBossPolls(client);
+
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
+  });
+
+  test("нет ID опросов → ранний выход без ошибок", async () => {
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({ channelId: "ch1", thursdayPollMessageId: null, saturdayPollMessageId: null, resultsMessageId: null }),
+    );
+    const client = {
+      channels: { fetch: vi.fn() },
+    } as unknown as Client;
+
+    await preReadBossPolls(client);
+
+    expect(vi.mocked(client.channels.fetch)).not.toHaveBeenCalled();
+    expect(vi.mocked(writeFileSync)).not.toHaveBeenCalled();
   });
 });
 
