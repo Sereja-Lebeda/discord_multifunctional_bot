@@ -98,6 +98,9 @@ function buildWelcomeContent(template: string, member: GuildMember): string {
 
 let botClient: Client | null = null;
 
+const REMINDER_MAX_RETRIES = 3;
+const REMINDER_RETRY_DELAY_MS = 10_000; // 10 сек между попытками
+
 async function sendReminder(
   channelId: string,
   text: string,
@@ -106,29 +109,39 @@ async function sendReminder(
   const client = botClient;
   if (!client) return;
 
-  try {
-    const ch = await client.channels.fetch(channelId);
-    if (!ch?.isSendable()) {
-      console.error(`[reminder] Канал ${channelId} недоступен для отправки сообщений.`);
-      return;
-    }
+  for (let attempt = 1; attempt <= REMINDER_MAX_RETRIES; attempt++) {
+    try {
+      const ch = await client.channels.fetch(channelId);
+      if (!ch?.isSendable()) {
+        // Не сетевая ошибка — канал просто недоступен, ретраить бессмысленно
+        console.error(`[reminder] Канал ${channelId} недоступен для отправки сообщений.`);
+        return;
+      }
 
-    const msg = await ch.send({
-      content: `@everyone ${text}`,
-      allowedMentions: { parse: ["everyone"] },
-    });
+      const msg = await ch.send({
+        content: `@everyone ${text}`,
+        allowedMentions: { parse: ["everyone"] },
+      });
 
-    if (deleteAfterMinutes != null && deleteAfterMinutes > 0) {
-      const ms = deleteAfterMinutes * 60 * 1000;
-      setTimeout(() => {
-        msg.delete().catch((err: unknown) => {
-          console.error("[reminder] Не удалось удалить сообщение:", err);
-        });
-      }, ms);
+      if (deleteAfterMinutes != null && deleteAfterMinutes > 0) {
+        const ms = deleteAfterMinutes * 60 * 1000;
+        setTimeout(() => {
+          msg.delete().catch((err: unknown) => {
+            console.error("[reminder] Не удалось удалить сообщение:", err);
+          });
+        }, ms);
+      }
+      return; // успешно отправлено
+
+    } catch (e) {
+      console.error(`[reminder] Попытка ${attempt}/${REMINDER_MAX_RETRIES} — ошибка:`, e);
+      if (attempt < REMINDER_MAX_RETRIES) {
+        console.warn(`[reminder] Повтор через ${REMINDER_RETRY_DELAY_MS / 1000} сек...`);
+        await new Promise(r => setTimeout(r, REMINDER_RETRY_DELAY_MS));
+      }
     }
-  } catch (e) {
-    console.error("[reminder] Не удалось отправить напоминание:", e);
   }
+  console.error(`[reminder] Все ${REMINDER_MAX_RETRIES} попытки исчерпаны — напоминание не отправлено.`);
 }
 
 const scheduledJobs: CronJob[] = [];
