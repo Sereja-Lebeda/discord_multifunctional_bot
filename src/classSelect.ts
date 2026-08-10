@@ -687,7 +687,9 @@ export async function handleClassMemberDisplayNameUpdate(
 
 export function registerClassMemberUpdate(client: Client): void {
   client.on(Events.GuildMemberUpdate, (oldM, newM) => {
-    void handleClassMemberDisplayNameUpdate(oldM, newM);
+    void handleClassMemberDisplayNameUpdate(oldM, newM).catch((e: unknown) =>
+      console.error("[class] GuildMemberUpdate — ошибка обновления лога:", e),
+    );
     if (newM.roles.cache.size > oldM.roles.cache.size) {
       const defaultRoleId = process.env.CLASS_DEFAULT_ROLE_ID?.trim();
       if (defaultRoleId && newM.roles.cache.has(defaultRoleId)) {
@@ -703,9 +705,9 @@ export function registerClassMemberUpdate(client: Client): void {
       if (memberHasNonClassRole(newM)) {
         const map = loadWelcomePromptMap();
         if (map[newM.id]) {
-          void deleteWelcomePromptMessage(client, newM.id).then(() =>
-            console.log(`[class] Промпт удалён — у ${newM.id} выдана не-классовая роль`),
-          );
+          void deleteWelcomePromptMessage(client, newM.id)
+            .then(() => console.log(`[class] Промпт удалён — у ${newM.id} выдана не-классовая роль`))
+            .catch((e: unknown) => console.error("[class] Не удалось удалить промпт при смене роли:", e));
         }
       }
     }
@@ -754,7 +756,9 @@ async function handleGuildMemberLeaveForClass(
 
 export function registerGuildMemberRemoveForClass(client: Client): void {
   client.on(Events.GuildMemberRemove, (member) => {
-    void handleGuildMemberLeaveForClass(client, member);
+    void handleGuildMemberLeaveForClass(client, member).catch((e: unknown) =>
+      console.error("[class] GuildMemberRemove — ошибка при выходе участника:", e),
+    );
   });
 }
 

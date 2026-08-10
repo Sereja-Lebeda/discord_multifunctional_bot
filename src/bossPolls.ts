@@ -49,36 +49,55 @@ export async function createBossPolls(client: Client): Promise<void> {
     return;
   }
 
-  const ch = await client.channels.fetch(channelId);
+  let ch;
+  try {
+    ch = await client.channels.fetch(channelId);
+  } catch (e) {
+    console.error("[boss-polls] Не удалось получить канал для создания опросов:", e);
+    return;
+  }
   if (!ch?.isSendable()) {
     console.error(`[boss-polls] Канал ${channelId} недоступен для отправки`);
     return;
   }
 
-  const poll1 = await ch.send({
-    poll: {
-      question: { text: "На босса в четверг" },
-      answers: [
-        { text: "19.00 - 20.00" },
-        { text: "После вечеринки в 20.30" },
-        { text: "21.00 - 22.00" },
-      ],
-      duration: POLL_DURATION_HOURS,
-      allowMultiselect: true,
-    },
-  });
+  let poll1: Message;
+  try {
+    poll1 = await ch.send({
+      poll: {
+        question: { text: "На босса в четверг" },
+        answers: [
+          { text: "19.00 - 20.00" },
+          { text: "После вечеринки в 20.30" },
+          { text: "21.00 - 22.00" },
+        ],
+        duration: POLL_DURATION_HOURS,
+        allowMultiselect: true,
+      },
+    });
+  } catch (e) {
+    console.error("[boss-polls] Не удалось создать опрос (четверг):", e);
+    return;
+  }
 
-  const poll2 = await ch.send({
-    poll: {
-      question: { text: "На босса в субботу" },
-      answers: [
-        { text: "18.00 - 19.00" },
-        { text: "19.00 - 20.00" },
-      ],
-      duration: POLL_DURATION_HOURS,
-      allowMultiselect: true,
-    },
-  });
+  let poll2: Message;
+  try {
+    poll2 = await ch.send({
+      poll: {
+        question: { text: "На босса в субботу" },
+        answers: [
+          { text: "18.00 - 19.00" },
+          { text: "19.00 - 20.00" },
+        ],
+        duration: POLL_DURATION_HOURS,
+        allowMultiselect: true,
+      },
+    });
+  } catch (e) {
+    console.error("[boss-polls] Не удалось создать опрос (суббота) — удаляем первый:", e);
+    try { await poll1.delete(); } catch { /* уже удалён или недоступен */ }
+    return;
+  }
 
   saveData({
     channelId,
@@ -169,7 +188,13 @@ export async function preReadBossPolls(client: Client): Promise<void> {
     return;
   }
 
-  const ch = await client.channels.fetch(data.channelId);
+  let ch;
+  try {
+    ch = await client.channels.fetch(data.channelId);
+  } catch (e) {
+    console.error("[boss-polls] preRead: не удалось получить канал:", e);
+    return;
+  }
   if (!ch?.isSendable()) {
     console.error(`[boss-polls] preRead: канал ${data.channelId} недоступен`);
     return;
@@ -222,7 +247,13 @@ export async function publishBossResults(client: Client): Promise<void> {
     return;
   }
 
-  const ch = await client.channels.fetch(data.channelId);
+  let ch;
+  try {
+    ch = await client.channels.fetch(data.channelId);
+  } catch (e) {
+    console.error("[boss-polls] Не удалось получить канал для публикации результатов:", e);
+    return;
+  }
   if (!ch?.isSendable()) {
     console.error(`[boss-polls] Канал ${data.channelId} недоступен`);
     return;
@@ -286,7 +317,9 @@ export async function publishBossResults(client: Client): Promise<void> {
           console.warn(`[boss-polls] Все ${VOTERS_MAX_RETRIES} попытки исчерпаны. Следующая через ${VOTERS_BACKGROUND_RETRY_MS / 60_000} мин...`);
           publishRetryTimer = setTimeout(() => {
             publishRetryTimer = null;
-            void publishBossResults(client);
+            void publishBossResults(client).catch((e: unknown) =>
+              console.error("[boss-polls] Фоновый ретрай publishBossResults упал:", e),
+            );
           }, VOTERS_BACKGROUND_RETRY_MS);
         }
         return;
