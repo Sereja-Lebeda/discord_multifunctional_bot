@@ -106,24 +106,28 @@ async function sendReminder(
   const client = botClient;
   if (!client) return;
 
-  const ch = await client.channels.fetch(channelId);
-  if (!ch?.isSendable()) {
-    console.error(`[reminder] Канал ${channelId} недоступен для отправки сообщений.`);
-    return;
-  }
+  try {
+    const ch = await client.channels.fetch(channelId);
+    if (!ch?.isSendable()) {
+      console.error(`[reminder] Канал ${channelId} недоступен для отправки сообщений.`);
+      return;
+    }
 
-  const msg = await ch.send({
-    content: `@everyone ${text}`,
-    allowedMentions: { parse: ["everyone"] },
-  });
+    const msg = await ch.send({
+      content: `@everyone ${text}`,
+      allowedMentions: { parse: ["everyone"] },
+    });
 
-  if (deleteAfterMinutes != null && deleteAfterMinutes > 0) {
-    const ms = deleteAfterMinutes * 60 * 1000;
-    setTimeout(() => {
-      msg.delete().catch((err: unknown) => {
-        console.error("[reminder] Не удалось удалить сообщение:", err);
-      });
-    }, ms);
+    if (deleteAfterMinutes != null && deleteAfterMinutes > 0) {
+      const ms = deleteAfterMinutes * 60 * 1000;
+      setTimeout(() => {
+        msg.delete().catch((err: unknown) => {
+          console.error("[reminder] Не удалось удалить сообщение:", err);
+        });
+      }, ms);
+    }
+  } catch (e) {
+    console.error("[reminder] Не удалось отправить напоминание:", e);
   }
 }
 
@@ -184,7 +188,11 @@ function startCronFromConfig(client: Client): void {
     ["promo-cleanup",        "0 4 * * *",    () => dailyPromoCleanup(client)],
   ];
   for (const [id, cron, fn] of bossJobs) {
-    const cj = new CronJob(cron, () => { void fn(); }, null, true, tz);
+    const cj = new CronJob(
+      cron,
+      () => { void fn().catch((e: unknown) => console.error(`[cron] ${id}:`, e)); },
+      null, true, tz,
+    );
     scheduledJobs.push(cj);
     console.log(`[cron] Задача "${id}" → ${cron} (${tz})`);
   }
