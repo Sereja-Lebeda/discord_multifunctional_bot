@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, vi } from "vitest";
-import type { SendableChannels } from "discord.js";
-import { extractCode, buildChunks, _forTesting } from "../promoCodes.js";
+import type { Message, SendableChannels } from "discord.js";
+import { extractCode, buildChunks, handlePromoMessage, _forTesting } from "../promoCodes.js";
 
 // ── Константы ────────────────────────────────────────────────────────────────
 
@@ -226,5 +226,158 @@ describe("cleanupOldPromoMessages", () => {
     const channel = makeChannel([]);
     await _forTesting.runCleanup(channel);
     expect(_forTesting.getBotMessageIds()).toEqual([]);
+  });
+});
+
+// ── tryAppendToLastMessage ────────────────────────────────────────────────────
+
+const MERGE_WINDOW_MS = 10 * 60 * 1000;
+
+/** Мок-канал, поддерживающий messages.fetch(id) с редактированием */
+function makeChannelWithEdit(
+  msgId: string,
+  content: string,
+  editFn = vi.fn().mockResolvedValue(undefined),
+) {
+  return {
+    isSendable: () => true,
+    send: vi.fn().mockResolvedValue({ id: "new-msg" }),
+    messages: {
+      fetch: vi.fn().mockResolvedValue({ id: msgId, content, edit: editFn }),
+    },
+  } as unknown as SendableChannels;
+}
+
+describe("tryAppendToLastMessage", () => {
+  beforeEach(() => _forTesting.reset());
+
+  test("в пределах 10 мин, коды влезают → edit вызван, send не вызван", async () => {
+    const editFn = vi.fn().mockResolvedValue(undefined);
+    const ch = makeChannelWithEdit("m1", `${HEADER}\ncode1`, editFn);
+
+    _forTesting.setLastBotMessageSentAt(Date.now() - 1_000); // 1 сек назад
+    _forTesting.setBotMessageIds(["m1"]);
+
+    const result = await _forTesting.tryAppend(ch, ["code2"]);
+
+    expect(result).toBe(true);
+    expect(editFn).toHaveBeenCalledWith(`${HEADER}\ncode1\ncode2`);
+    expect(ch.send).not.toHaveBeenCalled();
+  });
+
+  test("прошло больше 10 мин → возвращает false, fetch не вызван", async () => {
+    const ch = makeChannelWithEdit("m1", `${HEADER}\ncode1`);
+
+    _forTesting.setLastBotMessageSentAt(Date.now() - MERGE_WINDOW_MS - 1_000);
+    _forTesting.setBotMessageIds(["m1"]);
+
+    const result = await _forTesting.tryAppend(ch, ["code2"]);
+
+    expect(result).toBe(false);
+    expect((ch as any).messages.fetch).not.toHaveBeenCalled();
+  });
+
+  test("новый контент превысит 2000 символов → возвращает false, edit не вызван", async () => {
+    // Заполняем сообщение так, чтобы после дописывания вышло > 2000
+    const longContent = `${HEADER}\n` + "a".repeat(1990);
+    const editFn = vi.fn();
+    const ch = makeChannelWithEdit("m1", longContent, editFn);
+
+    _forTesting.setLastBotMessageSentAt(Date.now() - 1_000);
+    _forTesting.setBotMessageIds(["m1"]);
+
+    const result = await _forTesting.tryAppend(ch, ["newcode"]);
+
+    expect(result).toBe(false);
+    expect(editFn).not.toHaveBeenCalled();
+  });
+
+  test("botMessageIds пуст → возвращает false", async () => {
+    const ch = makeChannelWithEdit("m1", `${HEADER}\ncode1`);
+    _forTesting.setLastBotMessageSentAt(Date.now() - 1_000);
+    // botMessageIds остаётся пустым после reset()
+
+    const result = await _forTesting.tryAppend(ch, ["code2"]);
+
+    expect(result).toBe(false);
+    expect((ch as any).messages.fetch).not.toHaveBeenCalled();
+  });
+
+  test("lastBotMessageSentAt = null (после reset) → возвращает false", async () => {
+    const ch = makeChannelWithEdit("m1", `${HEADER}\ncode1`);
+    _forTesting.setBotMessageIds(["m1"]);
+    // lastBotMessageSentAt остаётся null после reset()
+
+    const result = await _forTesting.tryAppend(ch, ["code2"]);
+
+    expect(result).toBe(false);
+    expect((ch as any).messages.fetch).not.toHaveBeenCalled();
+  });
+
+  test("messages.fetch выбрасывает ошибку → возвращает false (fallback)", async () => {
+    const ch = {
+      isSendable: () => true,
+      send: vi.fn().mockResolvedValue({ id: "new-msg" }),
+      messages: {
+        fetch: vi.fn().mockRejectedValue(new Error("Unknown Message")),
+      },
+    } as unknown as SendableChannels;
+
+    _forTesting.setLastBotMessageSentAt(Date.now() - 1_000);
+    _forTesting.setBotMessageIds(["m1"]);
+
+    const result = await _forTesting.tryAppend(ch, ["code2"]);
+
+    expect(result).toBe(false);
+  });
+});
+
+// ── handlePromoMessage (end-to-end merge) ────────────────────────────────────
+
+describe("handlePromoMessage — merge-window", () => {
+  const CHANNEL_ID = "ch-promo";
+  const BOT_ID = "bot-id";
+  const USER_ID = "user-123";
+
+  beforeEach(() => _forTesting.reset());
+
+  test("два быстрых пакета → второй дописывается через edit, send не вызван повторно", async () => {
+    _forTesting.setChannelId(CHANNEL_ID);
+
+    const editFn = vi.fn().mockResolvedValue(undefined);
+    const sendFn = vi.fn().mockResolvedValue({ id: "msg-1" });
+    const fetchFn = vi.fn().mockResolvedValue({
+      id: "msg-1",
+      content: `${HEADER}\ncode1`,
+      edit: editFn,
+    });
+
+    const channel = {
+      isSendable: () => true,
+      send: sendFn,
+      messages: { fetch: fetchFn },
+    };
+
+    function makePromoMsg(content: string): Message {
+      return {
+        channelId: CHANNEL_ID,
+        content,
+        author: { id: USER_ID },
+        client: { user: { id: BOT_ID } },
+        channel,
+        delete: vi.fn().mockResolvedValue(undefined),
+      } as unknown as Message;
+    }
+
+    // Первый пакет → send
+    await handlePromoMessage(makePromoMsg("code1"));
+    expect(sendFn).toHaveBeenCalledOnce();
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // Второй пакет (в пределах 10 мин) → edit
+    await handlePromoMessage(makePromoMsg("code2"));
+    expect(sendFn).toHaveBeenCalledOnce(); // send вызван только один раз
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(editFn).toHaveBeenCalledWith(`${HEADER}\ncode1\ncode2`);
   });
 });

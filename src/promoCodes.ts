@@ -12,6 +12,11 @@ let botMessageIds: string[] = [];
 let promoChannelId: string | null = null;
 let isInitializing = false;
 
+/** Время (мс) последнего send/edit сообщения бота в promo-канале */
+let lastBotMessageSentAt: number | null = null;
+/** Окно слияния: новые коды дописываются к последнему сообщению, если оно свежее */
+const MERGE_WINDOW_MS = 10 * 60 * 1000; // 10 минут
+
 function getDiscordErrorCode(e: unknown): number {
   return e && typeof e === "object" && "code" in e
     ? Number((e as { code: unknown }).code)
@@ -115,9 +120,40 @@ async function sendNewBatch(channel: SendableChannels, codes: string[]): Promise
     try {
       const msg = await channel.send(chunk);
       botMessageIds.push(msg.id);
+      lastBotMessageSentAt = Date.now();
     } catch (e) {
       console.error("[promo-codes] Не удалось отправить сообщение:", e);
     }
+  }
+}
+
+/**
+ * Пытается дописать коды к последнему сообщению бота, если оно свежее (< MERGE_WINDOW_MS).
+ * Возвращает true при успехе, false — если нужно создать новое сообщение.
+ */
+async function tryAppendToLastMessage(
+  channel: SendableChannels,
+  newCodes: string[],
+): Promise<boolean> {
+  if (!lastBotMessageSentAt || Date.now() - lastBotMessageSentAt > MERGE_WINDOW_MS) {
+    return false;
+  }
+  const lastId = botMessageIds.at(-1);
+  if (!lastId) return false;
+
+  try {
+    const lastMsg = await channel.messages.fetch(lastId);
+    const appended = newCodes.map(c => `\n${c}`).join("");
+    const newContent = lastMsg.content + appended;
+    if (newContent.length > MAX_LEN) return false; // переполнение — создаём новое
+
+    await lastMsg.edit(newContent);
+    lastBotMessageSentAt = Date.now();
+    console.log(`[promo-codes] Дописано ${newCodes.length} код(ов) к сообщению ${lastId}`);
+    return true;
+  } catch (e) {
+    console.error("[promo-codes] Не удалось обновить последнее сообщение:", e);
+    return false; // fallback: создадим новое
   }
 }
 
@@ -168,12 +204,16 @@ export async function initPromoCodeChannel(client: Client): Promise<void> {
   // Разделить сообщения бота на свежие и устаревшие
   const cutoff = Date.now() - PROMO_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
   const freshBotMsgs: Message[] = [];
+  let maxFreshTimestamp = 0;
   for (const msg of botMsgs) {
     if (msg.createdTimestamp < cutoff) {
       await safeDelete(msg);
       console.log(`[promo-codes] Startup: удалено сообщение ${msg.id} (старше ${PROMO_MAX_AGE_DAYS} дней)`);
     } else {
       freshBotMsgs.push(msg);
+      if (msg.createdTimestamp > maxFreshTimestamp) {
+        maxFreshTimestamp = msg.createdTimestamp;
+      }
     }
   }
 
@@ -199,6 +239,9 @@ export async function initPromoCodeChannel(client: Client): Promise<void> {
   }
 
   botMessageIds = freshBotMsgs.sort((a, b) => (a.id < b.id ? -1 : 1)).map(m => m.id);
+
+  // Восстанавливаем временную метку: merge-window работает и после рестарта бота
+  if (maxFreshTimestamp > 0) lastBotMessageSentAt = maxFreshTimestamp;
 
   if (newCodes.length === 0) {
     console.log(`[promo-codes] Инициализация завершена. Кодов: ${promoSet.size}, сообщения бота без изменений.`);
@@ -236,7 +279,10 @@ export async function handlePromoMessage(message: Message): Promise<void> {
     return;
   }
 
-  await sendNewBatch(channel, newCodes);
+  const merged = await tryAppendToLastMessage(channel, newCodes);
+  if (!merged) {
+    await sendNewBatch(channel, newCodes);
+  }
 }
 
 export async function dailyPromoCleanup(client: Client): Promise<void> {
@@ -257,13 +303,18 @@ export const _forTesting = {
     botMessageIds = [];
     promoChannelId = null;
     isInitializing = false;
+    lastBotMessageSentAt = null;
   },
   setChannelId(id: string): void { promoChannelId = id; },
   setBotMessageIds(ids: string[]): void { botMessageIds = [...ids]; },
   setPromoSet(codes: string[]): void { promoSet = new Set(codes); },
+  setLastBotMessageSentAt(ts: number | null): void { lastBotMessageSentAt = ts; },
   getBotMessageIds(): string[] { return [...botMessageIds]; },
   getPromoSet(): Set<string> { return new Set(promoSet); },
   async runCleanup(channel: SendableChannels): Promise<void> {
     await cleanupOldPromoMessages(channel);
+  },
+  async tryAppend(channel: SendableChannels, codes: string[]): Promise<boolean> {
+    return tryAppendToLastMessage(channel, codes);
   },
 };
