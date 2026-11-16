@@ -287,6 +287,17 @@ async function main(): Promise<void> {
         console.error("[class-stats] Не удалось обновить сводку при старте:", e);
       }
     }
+
+    try {
+      const channel = await c.channels.fetch("1503666715924496456");
+      if (channel?.isSendable()) {
+        await channel.send("Я проснулься и готов служить");
+      } else {
+        console.error("[startup] Канал 1503666715924496456 недоступен для отправки.");
+      }
+    } catch (e) {
+      console.error("[startup] Не удалось отправить сообщение о готовности:", e);
+    }
   });
 
   client.on(Events.GuildMemberAdd, async (member) => {
